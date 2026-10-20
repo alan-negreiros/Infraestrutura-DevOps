@@ -129,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: image-*
           merge-multiple: true
@@ -171,7 +171,7 @@ jobs:
       matrix:
         service: [contratos, flash-sales]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: image-${{ matrix.service }}
           path: /tmp/images
