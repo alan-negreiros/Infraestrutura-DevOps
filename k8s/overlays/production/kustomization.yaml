@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: apis
+
+resources:
+  - ../../base
+
+images:
+  - name: contratos-api
+    newName: ghcr.io/OWNER/contratos-api
+    newTag: latest
+  - name: flash-sales-api
+    newName: ghcr.io/OWNER/flash-sales-api
+    newTag: latest
+
+patches:
+  - target:
+      kind: Service
+      name: gateway
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: LoadBalancer
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 20Gi
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: flash-sales
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
