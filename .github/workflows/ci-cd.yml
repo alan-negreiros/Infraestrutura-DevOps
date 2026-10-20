@@ -56,12 +56,12 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Lint do Dockerfile (contratos)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: services/contratos/Dockerfile
 
       - name: Lint do Dockerfile (flash-sales)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: services/flash-sales/Dockerfile
 
