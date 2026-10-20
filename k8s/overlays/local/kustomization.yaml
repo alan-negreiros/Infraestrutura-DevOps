@@ -1,0 +1,65 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: apis
+
+resources:
+  - ../../base
+  - redis-seed-job.yaml
+
+secretGenerator:
+  - name: apis-secrets
+    envs:
+      - secrets.env
+
+images:
+  - name: contratos-api
+    newTag: local
+  - name: flash-sales-api
+    newTag: local
+
+patches:
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: contratos|flash-sales
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicas
+        value: 4
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: gateway|flash-sales-export
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+  - target:
+      kind: Service
+      name: gateway
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30080
+  - target:
+      kind: Service
+      name: prometheus
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30090
+  - target:
+      kind: Service
+      name: grafana
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30300

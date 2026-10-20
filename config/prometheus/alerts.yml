@@ -1,0 +1,47 @@
+groups:
+  - name: apis
+    rules:
+      - alert: ApiInstanceDown
+        expr: up{service!=""} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instância {{ $labels.instance }} de {{ $labels.service }} está fora do ar"
+
+      - alert: ApiHighErrorRate
+        expr: |
+          sum by (service) (rate(http_request_duration_ms_count{status_code=~"5.."}[5m]))
+            / sum by (service) (rate(http_request_duration_ms_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} com mais de 5% de respostas 5xx"
+
+      - alert: ApiHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, le) (rate(http_request_duration_ms_bucket{route!~"/metrics|/health|/ready"}[5m]))
+          ) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} com latência p95 acima de 1s"
+
+      - alert: ApiEventLoopBlocked
+        expr: max by (service, instance) (nodejs_eventloop_lag_p99_seconds) > 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop de {{ $labels.instance }} ({{ $labels.service }}) bloqueado por mais de 1s"
+
+      - alert: ApiHighMemory
+        expr: max by (service, instance) (process_resident_memory_bytes) > 450 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} ({{ $labels.service }}) usando mais de 450 MiB de memória"

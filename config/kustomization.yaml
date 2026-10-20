@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: gateway-config
+    files:
+      - gateway/default.conf.template
+  - name: postgres-init
+    files:
+      - postgres/01-create-databases.sh
+  - name: prometheus-config
+    files:
+      - prometheus.yml=prometheus/prometheus-k8s.yml
+      - prometheus/alerts.yml
+  - name: grafana-datasources
+    files:
+      - grafana/provisioning/datasources/prometheus.yml
+  - name: grafana-dashboard-providers
+    files:
+      - grafana/provisioning/dashboards/dashboards.yml
+  - name: grafana-dashboards
+    files:
+      - grafana/dashboards/apis.json

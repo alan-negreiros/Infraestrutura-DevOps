@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: flash-sales-export
+  labels:
+    app.kubernetes.io/name: flash-sales-export
+spec:
+  selector:
+    app.kubernetes.io/name: flash-sales-export
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

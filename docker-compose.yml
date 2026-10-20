@@ -1,0 +1,215 @@
+name: atividade-devops
+
+x-api: &api
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  networks:
+    - backend
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  gateway:
+    image: nginxinc/nginx-unprivileged:1.28-alpine
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+      CONTRATOS_HOST: contratos
+      FLASH_SALES_HOST: flash-sales
+      FLASH_SALES_EXPORT_HOST: flash-sales-export
+    volumes:
+      - ./config/gateway/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      contratos:
+        condition: service_healthy
+      flash-sales:
+        condition: service_healthy
+      flash-sales-export:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging: *logging
+
+  contratos:
+    <<: *api
+    build: ./services/contratos
+    image: contratos-api:local
+    environment:
+      DB_HOST: postgres
+      DB_NAME: contracts_db
+      DB_USER: contratos
+      DB_PASSWORD: ${CONTRATOS_DB_PASSWORD:?defina CONTRATOS_DB_PASSWORD no .env}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?defina REDIS_PASSWORD no .env}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  flash-sales:
+    <<: *api
+    build: ./services/flash-sales
+    image: flash-sales-api:local
+    environment: &flash-sales-env
+      DB_HOST: postgres
+      DB_NAME: flash_sales
+      DB_USER: flash_sales
+      DB_PASSWORD: ${FLASH_SALES_DB_PASSWORD:?defina FLASH_SALES_DB_PASSWORD no .env}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?defina REDIS_PASSWORD no .env}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  flash-sales-export:
+    <<: *api
+    build: ./services/flash-sales
+    image: flash-sales-api:local
+    depends_on:
+      flash-sales:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *flash-sales-env
+      NODE_OPTIONS: --max-old-space-size=512
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      CONTRATOS_DB_PASSWORD: ${CONTRATOS_DB_PASSWORD}
+      FLASH_SALES_DB_PASSWORD: ${FLASH_SALES_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres/01-create-databases.sh:/docker-entrypoint-initdb.d/01-create-databases.sh:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  redis-seed:
+    image: redis:7.4-alpine
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        redis-cli -h redis SET "event:$$EVENT_ID:tickets" "$$EVENT_TICKETS" NX
+        redis-cli -h redis SET "event:$$LOAD_EVENT_ID:tickets" "$$LOAD_EVENT_TICKETS" NX
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+      EVENT_ID: ${SEED_EVENT_ID:-show-2026}
+      EVENT_TICKETS: ${SEED_EVENT_TICKETS:-1000}
+      LOAD_EVENT_ID: show-carga
+      LOAD_EVENT_TICKETS: "100000"
+    networks:
+      - backend
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - frontend
+      - backend
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?defina GRAFANA_ADMIN_PASSWORD no .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/apis.json
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - frontend
+    depends_on:
+      - prometheus
+    logging: *logging
+
+networks:
+  frontend:
+  backend:
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:

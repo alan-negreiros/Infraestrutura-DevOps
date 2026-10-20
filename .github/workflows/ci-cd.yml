@@ -1,0 +1,246 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Testes (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [contratos, flash-sales]
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+
+      - name: Instalar dependências
+        run: npm ci --no-audit --no-fund
+
+      - name: Verificar tipos
+        run: npm run typecheck
+
+      - name: Testes unitários
+        run: npm test -- --ci --coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Auditoria de dependências de produção
+        run: npm audit --omit=dev --audit-level=critical
+
+  lint-infra:
+    name: Validação da infraestrutura
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint do Dockerfile (contratos)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: services/contratos/Dockerfile
+
+      - name: Lint do Dockerfile (flash-sales)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: services/flash-sales/Dockerfile
+
+      - name: ShellCheck dos scripts
+        run: shellcheck scripts/*.sh tests/smoke/*.sh tests/network/*.sh config/postgres/*.sh
+
+      - name: Validar docker-compose.yml
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Validar manifestos Kubernetes (kubeconform)
+        run: |
+          cp k8s/overlays/local/secrets.env.example k8s/overlays/local/secrets.env
+          for overlay in local production; do
+            echo "Overlay: $overlay"
+            kubectl kustomize "k8s/overlays/$overlay" \
+              | docker run --rm -i ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary -
+          done
+
+  build:
+    name: Build e scan (${{ matrix.service }})
+    needs: [test, lint-infra]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [contratos, flash-sales]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build da imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          load: true
+          tags: ${{ matrix.service }}-api:local
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan de vulnerabilidades (Grype)
+        uses: anchore/scan-action@v6
+        with:
+          image: ${{ matrix.service }}-api:local
+          fail-build: true
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
+
+      - name: Exportar imagem
+        run: docker save ${{ matrix.service }}-api:local -o /tmp/${{ matrix.service }}-api.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp/${{ matrix.service }}-api.tar
+          retention-days: 3
+
+  e2e:
+    name: Testes E2E no Kubernetes (kind)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          merge-multiple: true
+          path: /tmp/images
+
+      - name: Carregar imagens testadas
+        run: for image in /tmp/images/*.tar; do docker load -i "$image"; done
+
+      - name: Instalar kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Provisionar cluster e aplicar manifestos
+        run: SKIP_BUILD=1 bash scripts/k8s-up.sh
+
+      - name: Smoke test pelo gateway
+        run: bash tests/smoke/smoke-test.sh http://localhost:8081
+
+      - name: Teste de isolamento de rede (NetworkPolicies)
+        run: bash tests/network/network-policy-test.sh
+
+      - name: Teste de carga curto
+        run: DURATION=30s CONTRATOS_RPS=10 CHECKOUT_RPS=20 EXPORT_RECORDS=50000 bash scripts/load-test.sh k8s
+
+      - name: Diagnóstico em caso de falha
+        if: failure()
+        run: bash scripts/k8s-debug.sh
+
+  publish:
+    name: Publicar imagens (${{ matrix.service }})
+    needs: e2e
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [contratos, flash-sales]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp/images
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Taguear e publicar a mesma imagem testada
+        env:
+          SERVICE: ${{ matrix.service }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          docker load -i "/tmp/images/${SERVICE}-api.tar"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${SERVICE}-api"
+          tags=("sha-${GITHUB_SHA::7}")
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            tags+=("${REF_NAME}")
+          else
+            tags+=("latest")
+          fi
+          for tag in "${tags[@]}"; do
+            docker tag "${SERVICE}-api:local" "${image}:${tag}"
+            docker push "${image}:${tag}"
+          done
+
+  deploy:
+    name: Deploy em produção
+    needs: publish
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configurar acesso ao cluster
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          mkdir -p ~/.kube
+          echo "$KUBECONFIG_B64" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Fixar as imagens desta versão
+        working-directory: k8s/overlays/production
+        run: |
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          tag="sha-${GITHUB_SHA::7}"
+          kustomize edit set image "contratos-api=${registry}/contratos-api:${tag}"
+          kustomize edit set image "flash-sales-api=${registry}/flash-sales-api:${tag}"
+
+      - name: Aplicar manifestos
+        run: kubectl apply -k k8s/overlays/production
+
+      - name: Aguardar rollout
+        run: |
+          for deployment in contratos flash-sales flash-sales-export gateway; do
+            kubectl -n apis rollout status "deployment/${deployment}" --timeout=300s
+          done
+
+      - name: Rollback automático
+        if: failure()
+        run: |
+          for deployment in contratos flash-sales flash-sales-export; do
+            kubectl -n apis rollout undo "deployment/${deployment}" || true
+          done
