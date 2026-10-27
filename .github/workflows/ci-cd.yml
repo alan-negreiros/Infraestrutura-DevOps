@@ -105,7 +105,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Scan de vulnerabilidades (Grype)
-        uses: anchore/scan-action@v6
+        uses: anchore/scan-action@v7
         with:
           image: ${{ matrix.service }}-api:local
           fail-build: true
